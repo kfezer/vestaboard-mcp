@@ -17,11 +17,12 @@ CHAR_MAP = {
     "H": 8,  "I": 9,  "J": 10, "K": 11, "L": 12, "M": 13, "N": 14,
     "O": 15, "P": 16, "Q": 17, "R": 18, "S": 19, "T": 20, "U": 21,
     "V": 22, "W": 23, "X": 24, "Y": 25, "Z": 26,
-    "!": 27, "@": 28, "#": 29, "$": 30, "(": 31, ")": 32, "-": 33,
-    "+": 34, "&": 35, "=": 36, ";": 37, ":": 38, "'": 39, '"': 40,
-    "%": 41, ",": 42, ".": 43, "/": 44, "?": 45, "°": 46,
-    "0": 47, "1": 48, "2": 49, "3": 50, "4": 51,
-    "5": 52, "6": 53, "7": 54, "8": 55, "9": 56,
+    # Digits per official Vestaboard codes: 1-9 = 27-35, 0 = 36
+    "1": 27, "2": 28, "3": 29, "4": 30, "5": 31,
+    "6": 32, "7": 33, "8": 34, "9": 35, "0": 36,
+    "!": 37, "@": 38, "#": 39, "$": 40, "(": 41, ")": 42, "-": 44,
+    "+": 46, "&": 47, "=": 48, ";": 49, ":": 50, "'": 52, '"': 53,
+    "%": 54, ",": 55, ".": 56, "/": 59, "?": 60, "°": 62,
 }
 
 COLOR_MAP = {
@@ -123,8 +124,9 @@ def vestaboard_clear() -> str:
 def vestaboard_send_raw(rows: list) -> str:
     """Send a raw character code grid to the Vestaboard.
     rows: a 6x22 list of lists with integer character codes.
-    Codes: 0=blank, 1-26=A-Z, 47-56=0-9, 63=red, 64=orange, 65=yellow,
-           66=green, 67=blue, 68=violet, 69=white, 70=black"""
+    Codes: 0=blank, 1-26=A-Z, 27-35=1-9, 36=0, 62=degree,
+           63=red, 64=orange, 65=yellow, 66=green, 67=blue,
+           68=violet, 69=white, 70=black"""
     if len(rows) != ROWS or any(len(r) != COLS for r in rows):
         return f"Invalid dimensions: need {ROWS}x{COLS} grid, got {len(rows)} rows"
     resp = requests.post(
