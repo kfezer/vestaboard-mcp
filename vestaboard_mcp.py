@@ -4,8 +4,11 @@
 import os
 import json
 import datetime
+import time
+import threading
 import requests
 from mcp.server.fastmcp import FastMCP
+from vestaboard import Formatter
 
 VESTABOARD_HOST = os.environ.get("VESTABOARD_HOST", "http://192.168.68.64:7000")
 VESTABOARD_API_KEY = os.environ.get("VESTABOARD_API_KEY", "")
@@ -37,9 +40,158 @@ DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
+# ---------------------------------------------------------------------------
+# Weather pixel-art icons — 6×22 grids of Vestaboard color codes
+# 0=blank  63=red  64=orange  65=yellow  66=green
+# 67=blue  68=violet  69=white  70=black
+# ---------------------------------------------------------------------------
+_n, _R, _O, _Y, _G, _B, _V, _W, _K = 0, 63, 64, 65, 66, 67, 68, 69, 70
+
+WEATHER_ICONS = {
+    # ☀️  Yellow sun on blue sky with 4-corner rays
+    "sunny": [
+        [_B,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_Y,_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_B,_B,_Y,_B,_B,_B],
+        [_B,_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_B,_Y,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_Y,_B,_B,_B,_B,_B,_B],
+    ],
+
+    # 🌤️  Small sun upper-left, white cloud right
+    "partly_cloudy": [
+        [_B,_B,_B,_Y,_B,_B,_Y,_B,_B,_B,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_B,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B],
+        [_B,_B,_Y,_Y,_Y,_Y,_Y,_Y,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B],
+        [_B,_B,_B,_Y,_Y,_Y,_Y,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B],
+        [_B,_B,_B,_B,_Y,_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B,_B],
+    ],
+
+    # ☁️  White cloud layers filling the board
+    "cloudy": [
+        [_B,_B,_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B],
+        [_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B],
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B],
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B],
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W],
+    ],
+
+    # 🌧️  Black cloud top half, blue rain drops bottom
+    "rainy": [
+        [_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n],
+        [_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n],
+        [_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B,_n,_B],
+    ],
+
+    # ❄️  White snowflake crosses on blue sky
+    "snowy": [
+        [_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B],
+        [_B,_W,_W,_W,_B,_B,_W,_W,_W,_B,_B,_W,_W,_W,_B,_B,_W,_W,_W,_B,_B,_B],
+        [_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B],
+        [_B,_B,_B,_W,_W,_W,_B,_B,_W,_W,_W,_B,_B,_W,_W,_W,_B,_B,_W,_W,_W,_B],
+        [_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B,_B,_B,_W,_B,_B],
+    ],
+
+    # ⛈️  Black sky + orange double lightning bolts + blue rain
+    "stormy": [
+        [_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_K,_K,_O,_O,_K,_K,_K,_K,_K,_K,_K,_O,_O,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_K,_O,_O,_K,_K,_K,_K,_K,_K,_K,_O,_O,_K,_K,_K,_K,_K,_K,_K,_K],
+        [_K,_K,_O,_O,_O,_K,_B,_B,_K,_K,_K,_O,_O,_O,_K,_B,_B,_K,_K,_K,_K,_K],
+        [_K,_K,_O,_K,_K,_K,_B,_K,_K,_K,_K,_O,_K,_K,_K,_B,_K,_K,_K,_K,_K,_K],
+    ],
+
+    # 🌫️  Alternating white fog bands
+    "foggy": [
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W],
+        [_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n],
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W],
+        [_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n],
+        [_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W],
+        [_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n,_n],
+    ],
+
+    # 🥵  Red-orange sun — used for hot/scorching conditions
+    "hot": [
+        [_B,_B,_B,_B,_B,_O,_B,_B,_B,_B,_O,_B,_B,_B,_B,_O,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_R,_R,_R,_R,_R,_R,_R,_R,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_O,_B,_B,_R,_R,_R,_Y,_Y,_Y,_Y,_Y,_Y,_R,_R,_R,_B,_B,_O,_B,_B,_B],
+        [_B,_B,_B,_O,_R,_R,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_Y,_R,_R,_O,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_R,_R,_R,_R,_R,_R,_R,_R,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_O,_B,_B,_B,_B,_O,_B,_B,_B,_B,_O,_B,_B,_B,_B,_B,_B],
+    ],
+
+    # 💨  Horizontal white streaks — windy
+    "windy": [
+        [_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_W,_B,_B,_B,_B,_B],
+        [_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B,_B],
+    ],
+}
+
+# Aliases for common condition string variations
+_ICON_MAP = {
+    "sunny": "sunny",
+    "clear": "sunny",
+    "hot": "hot",
+    "scorching": "hot",
+    "partly cloudy": "partly_cloudy",
+    "mostly clear": "partly_cloudy",
+    "partly sunny": "partly_cloudy",
+    "patchy rain": "partly_cloudy",
+    "cloudy": "cloudy",
+    "overcast": "cloudy",
+    "mostly cloudy": "cloudy",
+    "broken clouds": "cloudy",
+    "light rain": "rainy",
+    "light drizzle": "rainy",
+    "drizzle": "rainy",
+    "rain": "rainy",
+    "heavy rain": "rainy",
+    "showers": "rainy",
+    "patchy light rain": "rainy",
+    "light snow": "snowy",
+    "snow": "snowy",
+    "heavy snow": "snowy",
+    "blizzard": "snowy",
+    "blowing snow": "snowy",
+    "freezing drizzle": "snowy",
+    "sleet": "snowy",
+    "thunderstorm": "stormy",
+    "thunder": "stormy",
+    "storm": "stormy",
+    "tstorm": "stormy",
+    "fog": "foggy",
+    "mist": "foggy",
+    "haze": "foggy",
+    "smoke": "foggy",
+    "windy": "windy",
+    "breezy": "windy",
+    "gale": "windy",
+}
+
+
+def get_weather_icon(condition: str) -> list | None:
+    """Return a 6×22 icon grid for the given weather condition string, or None."""
+    lower = condition.lower()
+    for key, icon_name in _ICON_MAP.items():
+        if key in lower:
+            return WEATHER_ICONS[icon_name]
+    return None
+
 
 def text_to_board(text: str) -> list[list[int]]:
-    """Convert multi-line text into a 6x22 character code grid, centered."""
+    """Convert multi-line text into a 6×22 character code grid, centered."""
     lines = text.upper().splitlines()[:ROWS]
     board = []
     for line in lines:
@@ -94,6 +246,14 @@ def _shorten_condition(desc: str, max_len: int = 9) -> str:
     return desc.upper()[:max_len]
 
 
+def _cycle_screens(screens: list, delay: int) -> None:
+    """Post a sequence of screens with a delay between each (background thread)."""
+    for i, screen in enumerate(screens):
+        _post_board(screen)
+        if i < len(screens) - 1:
+            time.sleep(delay)
+
+
 mcp = FastMCP("vestaboard")
 
 
@@ -101,7 +261,7 @@ mcp = FastMCP("vestaboard")
 def vestaboard_weather_forecast(location: str = "Seattle") -> str:
     """Fetch the current weather forecast and display it on the Vestaboard.
 
-    Fetches live data from wttr.in and formats it for the 6x22 display:
+    Shows a weather icon for 4 seconds, then switches to the full data:
       Row 1: City + date
       Row 2: Current condition + temperature
       Row 3: Feels like + humidity
@@ -129,30 +289,27 @@ def vestaboard_weather_forecast(location: str = "Seattle") -> str:
         temp_c = cur["temp_C"]
         feels_f = cur["FeelsLikeF"]
         humidity = cur["humidity"]
-        condition = _shorten_condition(cur["weatherDesc"][0]["value"])
+        condition_raw = cur["weatherDesc"][0]["value"]
+        condition = _shorten_condition(condition_raw)
 
         today = datetime.date.today()
         date_str = f"{DAYS[today.weekday()]} {MONTHS[today.month-1]} {today.day}"
 
-        # Row 1: city + date (truncate city to fit)
         header = f"{city.upper()[:10]} {date_str}"
         if len(header) > COLS:
             header = f"{city.upper()[:8]} {date_str}"
 
-        # Row 2: condition + temp
         row2 = f"{condition} {temp_f}F/{temp_c}C"
         if len(row2) > COLS:
             row2 = f"{condition} {temp_f}F"
 
-        # Row 3: feels like + humidity
         row3 = f"FEELS {feels_f}F  HUM {humidity}%"
         if len(row3) > COLS:
             row3 = f"FL {feels_f}F HM {humidity}%"
 
-        # Rows 4-6: 3-day forecast
         forecast_rows = []
         for day_data in data.get("weather", [])[:3]:
-            raw_date = day_data["date"]  # YYYY-MM-DD
+            raw_date = day_data["date"]
             d = datetime.date.fromisoformat(raw_date)
             day_name = DAYS[d.weekday()]
             hi = day_data["maxtempF"]
@@ -164,12 +321,21 @@ def vestaboard_weather_forecast(location: str = "Seattle") -> str:
             forecast_rows.append(row)
 
         board_text = "\n".join([header, row2, row3] + forecast_rows)
-        result = _post_board(text_to_board(board_text))
+        text_screen = text_to_board(board_text)
+
+        icon = get_weather_icon(condition_raw)
+        if icon:
+            _post_board(icon)
+            time.sleep(4)
+
+        result = _post_board(text_screen)
 
         if result == "ok":
+            icon_note = f" (showed {condition_raw.lower()} icon)" if icon else ""
             return (
-                f"Weather forecast for {city} sent to Vestaboard.\n"
-                f"Current: {condition}, {temp_f}°F / {temp_c}°C, feels like {feels_f}°F, humidity {humidity}%\n"
+                f"Weather forecast for {city} sent to Vestaboard{icon_note}.\n"
+                f"Current: {condition_raw}, {temp_f}°F / {temp_c}°C, "
+                f"feels like {feels_f}°F, humidity {humidity}%\n"
                 f"Board text:\n{board_text}"
             )
         return f"Fetched weather but Vestaboard error: {result}"
@@ -193,6 +359,60 @@ def vestaboard_send_text(text: str) -> str:
     if resp.ok:
         return f"Message sent successfully: {repr(text)}"
     return f"Error {resp.status_code}: {resp.text}"
+
+
+@mcp.tool()
+def vestaboard_send_long_text(text: str, delay: int = 8) -> str:
+    """Send text longer than one screen — automatically splits into multiple
+    6×22 screens and cycles through them with a delay between each.
+
+    Useful for announcements, multi-line messages, or anything over 6 rows.
+    Returns immediately; screens cycle in the background.
+
+    Args:
+        text: Text to display. Word-wrapped automatically at 22 chars.
+        delay: Seconds between screens (default: 8).
+    """
+    f = Formatter()
+    screens = f.createScreens(text, justify="center", align="center")
+
+    if not screens:
+        return "No content to display."
+
+    if len(screens) == 1:
+        result = _post_board(screens[0])
+        return "Message sent (1 screen)." if result == "ok" else result
+
+    thread = threading.Thread(
+        target=_cycle_screens, args=(screens, delay), daemon=True
+    )
+    thread.start()
+    return (
+        f"Cycling {len(screens)} screens on Vestaboard "
+        f"({delay}s between each). First screen posted."
+    )
+
+
+@mcp.tool()
+def vestaboard_show_icon(condition: str) -> str:
+    """Display a weather icon directly by condition name.
+
+    Available conditions: sunny, clear, partly_cloudy, cloudy, overcast,
+    rainy, light_rain, heavy_rain, snowy, light_snow, stormy, thunderstorm,
+    foggy, misty, hot, windy.
+
+    Args:
+        condition: Weather condition name or description.
+    """
+    icon = get_weather_icon(condition)
+    if icon is None:
+        available = ", ".join(sorted(set(_ICON_MAP.keys())))
+        return (
+            f"No icon found for '{condition}'. "
+            f"Recognized keywords: {available}"
+        )
+    result = _post_board(icon)
+    return f"Icon displayed for '{condition}'." if result == "ok" else result
 
 
 @mcp.tool()
